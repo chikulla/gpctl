@@ -1,0 +1,359 @@
+#!/bin/zsh
+# gpctl: インストール済みの GlobalProtect アプリを Accessibility API 経由で操作する CLI
+
+set -u
+
+readonly VERSION="0.1.0"
+readonly APP_PATH="${GPCTL_APP_PATH:-/Applications/GlobalProtect.app}"
+readonly PROCESS_NAME="GlobalProtect"
+readonly POLL_INTERVAL_SECONDS=1
+readonly AUTH_MESSAGE="Authentication is required. Complete sign-in in GlobalProtect or your browser."
+
+readonly EXIT_FAILURE=1
+readonly EXIT_USAGE=2
+readonly EXIT_APP_NOT_AVAILABLE=3
+readonly EXIT_PERMISSION=4
+readonly EXIT_TIMEOUT=5
+readonly EXIT_UNKNOWN_STATE=6
+
+timeout_seconds=120
+verbose=false
+no_wait=false
+
+usage() {
+  cat <<'USAGE'
+Usage: gpctl <command> [options]
+
+Commands:
+  connect      Connect to GlobalProtect
+  disconnect   Disconnect from GlobalProtect
+  status       Show the current connection state
+  toggle       Connect if not connected, disconnect if connected
+  help         Show this help
+  version      Show the version
+
+Options:
+  --timeout <seconds>  Maximum seconds to wait for the state change (default: 120)
+  --verbose            Show UI detection and state details
+  --no-wait            Exit right after starting connect / disconnect
+USAGE
+}
+
+die() {
+  local exit_code=$1
+  shift
+  print -ru2 -- "gpctl: $*"
+  exit $exit_code
+}
+
+info() {
+  print -ru2 -- "$*"
+}
+
+log_verbose() {
+  [[ $verbose == true ]] || return 0
+  print -ru2 -- "[verbose] $*"
+}
+
+# GlobalProtect のメニューバーのポップオーバーを開き、UI 要素を操作する。
+# mode:
+#   dump          静的テキストとボタンを "text:<値>" / "button:<ラベル>" の行で出力する
+#   click <label> ラベルが一致するボタンを押す
+#   close         ポップオーバーが開いていれば閉じる
+run_ui_script() {
+  local output exit_status
+  output=$(osascript - "$@" 2>&1 <<'APPLESCRIPT'
+on run argv
+	set mode to item 1 of argv
+	tell application "System Events"
+		tell process "GlobalProtect"
+			if mode is "close" then
+				if (count of windows) > 0 then click menu bar item 1 of menu bar 2
+				return ""
+			end if
+			if (count of windows) is 0 then
+				click menu bar item 1 of menu bar 2
+				repeat 20 times
+					if (count of windows) > 0 then exit repeat
+					delay 0.1
+				end repeat
+			end if
+			if (count of windows) is 0 then error "UI element not found: GlobalProtect window" number 1001
+			set uiElements to entire contents of window 1
+		end tell
+	end tell
+	if mode is "dump" then return my dumpElements(uiElements)
+	if mode is "click" then return my clickButton(uiElements, item 2 of argv)
+	error "Unknown mode: " & mode
+end run
+
+on dumpElements(uiElements)
+	set output to {}
+	tell application "System Events"
+		repeat with e in uiElements
+			try
+				set elementRole to role of e
+				if elementRole is "AXStaticText" then
+					set end of output to "text:" & my textOf(value of e)
+				else if elementRole is "AXButton" then
+					set end of output to "button:" & my buttonText(e)
+				end if
+			end try
+		end repeat
+	end tell
+	set AppleScript's text item delimiters to linefeed
+	return output as text
+end dumpElements
+
+on clickButton(uiElements, targetText)
+	tell application "System Events"
+		repeat with e in uiElements
+			try
+				set isTarget to (role of e is "AXButton" and my buttonText(e) is targetText)
+			on error
+				set isTarget to false
+			end try
+			if isTarget then
+				click e
+				return ""
+			end if
+		end repeat
+	end tell
+	error "UI element not found: button " & targetText number 1001
+end clickButton
+
+on buttonText(e)
+	tell application "System Events"
+		set result_ to my textOf(name of e)
+		if result_ is "" then set result_ to my textOf(description of e)
+	end tell
+	return result_
+end buttonText
+
+on textOf(v)
+	if v is missing value then return ""
+	return v as text
+end textOf
+APPLESCRIPT
+)
+  exit_status=$?
+  if (( exit_status == 0 )); then
+    print -r -- "$output"
+    return 0
+  fi
+
+  log_verbose "osascript failed: $output"
+  # -1719: assistive access がない / -1743: Apple events の送信が許可されていない
+  if [[ $output == *"-1719"* || $output == *"-1743"* || $output == *"assistive access"* || $output == *"Not authorized"* ]]; then
+    die $EXIT_PERMISSION "Accessibility / Automation permission is missing. See 'macOS Permissions' in README.
+$output"
+  fi
+  die $EXIT_UNKNOWN_STATE "Failed to operate GlobalProtect UI.
+$output"
+}
+
+# "disconnecting" や "not connected" は "connected" を含むため、"text:" 接頭辞付きで照合し、判定順も固定する
+classify_state() {
+  local dump=${(L)1}
+  if [[ $dump == *"button:sign in"* || $dump == *"text:authentication"* ]]; then
+    print authentication-required
+  elif [[ $dump == *"text:disconnecting"* ]]; then
+    print disconnecting
+  elif [[ $dump == *"text:connecting"* ]]; then
+    print connecting
+  elif [[ $dump == *"text:not connected"* || $dump == *"text:disconnected"* ]]; then
+    print disconnected
+  elif [[ $dump == *"text:connected"* ]]; then
+    print connected
+  elif [[ $dump == *"button:disconnect"* ]]; then
+    print connected
+  elif [[ $dump == *"button:connect"* ]]; then
+    print disconnected
+  else
+    print unknown
+  fi
+}
+
+read_state() {
+  local dump state
+  dump=$(run_ui_script dump) || exit $?
+  log_verbose "UI elements:"$'\n'"$dump"
+  state=$(classify_state "$dump")
+  log_verbose "state: $state"
+  print -r -- "$state"
+}
+
+# 閉じられなくても接続・切断の結果は変わらないため、失敗は無視する
+close_popover() {
+  (run_ui_script close) >/dev/null 2>&1
+}
+
+ensure_app_running() {
+  [[ -d $APP_PATH ]] || die $EXIT_APP_NOT_AVAILABLE "GlobalProtect not found: $APP_PATH"
+  pgrep -xq "$PROCESS_NAME" && return 0
+
+  info "Opening GlobalProtect..."
+  open -g "$APP_PATH" || die $EXIT_APP_NOT_AVAILABLE "Failed to launch GlobalProtect."
+  repeat 10; do
+    pgrep -xq "$PROCESS_NAME" && return 0
+    sleep 1
+  done
+  die $EXIT_APP_NOT_AVAILABLE "GlobalProtect did not start."
+}
+
+wait_until_state() {
+  local target_state=$1
+  local deadline=$(( SECONDS + timeout_seconds ))
+  local state auth_message_shown=false
+
+  while (( SECONDS < deadline )); do
+    sleep $POLL_INTERVAL_SECONDS
+    state=$(read_state) || exit $?
+    [[ $state == $target_state ]] && return 0
+    if [[ $state == authentication-required && $auth_message_shown == false ]]; then
+      info "$AUTH_MESSAGE"
+      auth_message_shown=true
+    fi
+  done
+  die $EXIT_TIMEOUT "Timed out after ${timeout_seconds} seconds waiting for $target_state."
+}
+
+cmd_connect() {
+  ensure_app_running
+  local state
+  state=$(read_state) || exit $?
+
+  case $state in
+    connected)
+      close_popover
+      print "Already connected."
+      return 0
+      ;;
+    disconnected)
+      run_ui_script click Connect >/dev/null
+      ;;
+    connecting | authentication-required)
+      ;;
+    disconnecting)
+      die $EXIT_FAILURE "GlobalProtect is disconnecting. Try again later."
+      ;;
+    *)
+      die $EXIT_UNKNOWN_STATE "Could not determine GlobalProtect state. Run with --verbose for details."
+      ;;
+  esac
+
+  if [[ $no_wait == true ]]; then
+    close_popover
+    print "Connection started."
+    return 0
+  fi
+
+  info "Waiting for connection..."
+  wait_until_state connected
+  close_popover
+  print "Connected."
+}
+
+cmd_disconnect() {
+  ensure_app_running
+  local state
+  state=$(read_state) || exit $?
+
+  case $state in
+    disconnected)
+      close_popover
+      print "Already disconnected."
+      return 0
+      ;;
+    connected)
+      run_ui_script click Disconnect >/dev/null
+      ;;
+    disconnecting)
+      ;;
+    connecting | authentication-required)
+      die $EXIT_FAILURE "GlobalProtect is connecting. Try again later."
+      ;;
+    *)
+      die $EXIT_UNKNOWN_STATE "Could not determine GlobalProtect state. Run with --verbose for details."
+      ;;
+  esac
+
+  if [[ $no_wait == true ]]; then
+    close_popover
+    print "Disconnection started."
+    return 0
+  fi
+
+  info "Waiting for disconnection..."
+  wait_until_state disconnected
+  close_popover
+  print "Disconnected."
+}
+
+cmd_status() {
+  ensure_app_running
+  local state
+  state=$(read_state) || exit $?
+  close_popover
+  print -r -- "$state"
+
+  case $state in
+    connected) return 0 ;;
+    unknown) return $EXIT_UNKNOWN_STATE ;;
+    *) return $EXIT_FAILURE ;;
+  esac
+}
+
+cmd_toggle() {
+  ensure_app_running
+  local state
+  state=$(read_state) || exit $?
+  if [[ $state == connected ]]; then
+    cmd_disconnect
+  else
+    cmd_connect
+  fi
+}
+
+main() {
+  if (( $# == 0 )); then
+    usage >&2
+    exit $EXIT_USAGE
+  fi
+
+  local command=$1
+  shift
+  while (( $# > 0 )); do
+    case $1 in
+      --timeout)
+        (( $# >= 2 )) || die $EXIT_USAGE "--timeout requires a value."
+        [[ $2 == <1-> ]] || die $EXIT_USAGE "--timeout must be a positive integer: $2"
+        timeout_seconds=$2
+        shift 2
+        ;;
+      --verbose)
+        verbose=true
+        shift
+        ;;
+      --no-wait)
+        no_wait=true
+        shift
+        ;;
+      *)
+        die $EXIT_USAGE "Unknown option: $1"
+        ;;
+    esac
+  done
+
+  case $command in
+    connect) cmd_connect ;;
+    disconnect) cmd_disconnect ;;
+    status) cmd_status ;;
+    toggle) cmd_toggle ;;
+    help | --help | -h) usage ;;
+    version | --version) print "gpctl $VERSION" ;;
+    *) die $EXIT_USAGE "Unknown command: $command. Run 'gpctl help'." ;;
+  esac
+}
+
+main "$@"
