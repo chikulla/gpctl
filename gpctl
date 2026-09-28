@@ -27,6 +27,7 @@ Usage: gpctl <command> [options]
 Commands:
   connect      Connect to GlobalProtect
   disconnect   Disconnect from GlobalProtect
+  refresh      Refresh the GlobalProtect connection
   status       Show the current connection state
   toggle       Connect if not connected, disconnect if connected
   help         Show this help
@@ -60,6 +61,8 @@ log_verbose() {
 #   dump          静的テキストとボタンを "text:<値>" / "button:<ラベル>" の行で出力する
 #   peek          ポップオーバーが開いている場合だけ UI 要素を出力する
 #   click <label> ラベルが一致するボタンを押す
+#   refresh-menu  オプションメニューの Refresh Connection を押す
+#   refresh-confirm 確認画面の Refresh Connection ボタンを押す
 #   close         ポップオーバーが開いていれば閉じる
 run_ui_script() {
   local output exit_status
@@ -73,6 +76,7 @@ on run argv
 				return ""
 			end if
 			if mode is "peek" and (count of windows) is 0 then return "popover-closed"
+			if mode is "refresh-confirm" and (count of windows) is 0 then error "UI element not found: Refresh Connection confirmation window" number 1001
 			if (count of windows) is 0 then
 				click menu bar item 1 of menu bar 2
 				repeat 20 times
@@ -86,6 +90,8 @@ on run argv
 	end tell
 	if mode is "dump" or mode is "peek" then return my dumpElements(uiElements)
 	if mode is "click" then return my clickButton(uiElements, item 2 of argv)
+	if mode is "refresh-menu" then return my clickRefreshMenuItem(uiElements)
+	if mode is "refresh-confirm" then return my clickRefreshConfirmation()
 	error "Unknown mode: " & mode
 end run
 
@@ -123,6 +129,84 @@ on clickButton(uiElements, targetText)
 	end tell
 	error "UI element not found: button " & targetText number 1001
 end clickButton
+
+on clickRefreshMenuItem(uiElements)
+	set optionsButton to missing value
+	set menuItemClicked to false
+	tell application "System Events"
+		repeat with e in uiElements
+			try
+				if role of e is "AXPopUpButton" and value of attribute "AXIdentifier" of e is "gp.menu.options" then
+					set optionsButton to e
+					exit repeat
+				end if
+			end try
+		end repeat
+		if optionsButton is missing value then error "UI element not found: GlobalProtect options menu" number 1001
+		click optionsButton
+		set visibleMenuItems to {}
+		repeat 20 times
+			set visibleMenuItems to {}
+			try
+				set menuElements to entire contents of process "GlobalProtect"
+			on error
+				set menuElements to {}
+			end try
+			repeat with menuItem in menuElements
+				try
+					if role of menuItem is "AXMenuItem" then
+						set label_ to my textOf(name of menuItem)
+						set end of visibleMenuItems to label_
+						set identifier_ to ""
+						try
+							set identifier_ to my textOf(value of attribute "AXIdentifier" of menuItem)
+						end try
+						if identifier_ is "gp.menu.refresh" or label_ is "Refresh Connection" or label_ is "接続を更新" then
+							click menuItem
+							set menuItemClicked to true
+							exit repeat
+						end if
+						end if
+				end try
+			end repeat
+			if menuItemClicked then exit repeat
+			delay 0.1
+		end repeat
+		if not menuItemClicked then error "UI element not found: Refresh Connection (visible menu items: " & visibleMenuItems & ")" number 1001
+	end tell
+	return ""
+end clickRefreshMenuItem
+
+on clickRefreshConfirmation()
+	tell application "System Events"
+		set confirmationShown to false
+		repeat 50 times
+			try
+				set refreshElements to entire contents of process "GlobalProtect"
+			on error
+				set refreshElements to {}
+			end try
+			repeat with e in refreshElements
+				try
+					set elementRole to role of e
+					if elementRole is "AXStaticText" then
+						set message_ to my textOf(value of e)
+						if message_ contains "Refresh?" or message_ contains "更新?" then set confirmationShown to true
+					else if elementRole is "AXButton" then
+						set label_ to my buttonText(e)
+						if label_ is "Refresh Connection" or label_ is "接続を更新" then
+							click e
+							return ""
+						end if
+					end if
+				end try
+			end repeat
+			delay 0.1
+		end repeat
+	end tell
+	if confirmationShown then error "UI element not found: Refresh Connection confirmation button" number 1001
+	error "Could not confirm Refresh Connection" number 1001
+end clickRefreshConfirmation
 
 on buttonText(e)
 	tell application "System Events"
@@ -309,6 +393,13 @@ cmd_disconnect() {
   print "Disconnected."
 }
 
+cmd_refresh() {
+  ensure_app_running
+  run_ui_script refresh-menu >/dev/null
+  run_ui_script refresh-confirm >/dev/null
+  print "Connection refresh started."
+}
+
 cmd_status() {
   ensure_app_running
   local state
@@ -367,6 +458,7 @@ main() {
   case $command in
     connect) cmd_connect ;;
     disconnect) cmd_disconnect ;;
+    refresh) cmd_refresh ;;
     status) cmd_status ;;
     toggle) cmd_toggle ;;
     help | --help | -h) usage ;;

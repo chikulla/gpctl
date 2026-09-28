@@ -17,6 +17,11 @@ setup() {
   cat > "$FAKE_DIR/bin/osascript" <<'FAKE'
 #!/bin/zsh
 cat >/dev/null
+print -r -- "$2" >> "$FAKE_DIR/actions"
+if [[ $2 == refresh-confirm && -f $FAKE_DIR/refresh_confirm_error ]]; then
+  print -r -- "UI element not found: Refresh Connection confirmation button (1001)" >&2
+  exit 1
+fi
 if [[ -f $FAKE_DIR/osascript_error ]]; then
   cat "$FAKE_DIR/osascript_error" >&2
   exit 1
@@ -32,6 +37,12 @@ case $2 in
     ;;
   click)
     print -r -- "$3" >> "$FAKE_DIR/clicks"
+    ;;
+  refresh-menu)
+    print -r -- "Refresh Connection menu item" >> "$FAKE_DIR/clicks"
+    ;;
+  refresh-confirm)
+    print -r -- "Refresh Connection button" >> "$FAKE_DIR/clicks"
     ;;
 esac
 FAKE
@@ -144,6 +155,26 @@ test_connect_no_wait_does_not_poll() {
   teardown
 }
 
+test_refresh_uses_native_menu_without_polling() {
+  setup
+  run_gpctl refresh
+  assert_eq "refresh: exit code" 0 "$exit_code"
+  assert_eq "refresh: selects menu item and confirms" $'Refresh Connection menu item\nRefresh Connection button' "$(clicks)"
+  assert_eq "refresh: prints result" "Connection refresh started." "$stdout"
+  assert_eq "refresh: does not poll connection state" "" "$(cat "$FAKE_DIR/reads" 2>/dev/null)"
+  assert_eq "refresh: touches UI only for both required clicks" $'refresh-menu\nrefresh-confirm' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_refresh_fails_if_confirmation_is_not_clicked() {
+  setup
+  touch "$FAKE_DIR/refresh_confirm_error"
+  run_gpctl refresh
+  assert_eq "refresh confirmation failure: exit code" 6 "$exit_code"
+  assert_eq "refresh confirmation failure: no success message" "" "$stdout"
+  teardown
+}
+
 test_toggle_disconnects_when_connected() {
   setup
   set_dumps "text:Connected" "text:Connected" "text:Not Connected"
@@ -206,6 +237,8 @@ test_connect_stops_polling_when_popover_closes
 test_connect_when_already_connected_does_not_click
 test_connect_times_out
 test_connect_no_wait_does_not_poll
+test_refresh_uses_native_menu_without_polling
+test_refresh_fails_if_confirmation_is_not_clicked
 test_toggle_disconnects_when_connected
 test_toggle_connects_when_disconnected
 test_invalid_arguments

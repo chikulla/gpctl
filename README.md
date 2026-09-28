@@ -2,7 +2,7 @@
 
 `gpctl` は、macOS にインストールされている Palo Alto Networks GlobalProtect アプリを、ターミナルから操作するための小さな CLI ユーティリティです。
 
-接続、切断、状態確認、および接続状態の切り替えを、マウス操作なしで実行できます。
+接続、切断、接続の更新、状態確認、および接続状態の切り替えを、マウス操作なしで実行できます。
 
 > [!IMPORTANT]
 > `gpctl` は VPN プロトコルを独自実装するクライアントではありません。
@@ -13,6 +13,7 @@
 
 - CLI から GlobalProtect へ接続
 - CLI から GlobalProtect を切断
+- CLI から GlobalProtect の接続を更新
 - 現在の接続状態を表示
 - 接続・切断を自動的に切り替える `toggle`
 - メニュー表示中は接続完了またはタイムアウトまで待機
@@ -93,6 +94,7 @@ gpctl <command> [options]
 |---|---|
 | `gpctl connect` | GlobalProtect へ接続します。 |
 | `gpctl disconnect` | GlobalProtect を切断します。 |
+| `gpctl refresh` | GlobalProtect の **Refresh Connection** を実行します。 |
 | `gpctl status` | 現在の接続状態を表示します。 |
 | `gpctl toggle` | 未接続なら接続し、接続済みなら切断します。 |
 | `gpctl help` | ヘルプを表示します。 |
@@ -134,6 +136,14 @@ gpctl connect --timeout 60
 ```bash
 gpctl disconnect
 ```
+
+### 接続を更新する
+
+```bash
+gpctl refresh
+```
+
+GlobalProtect のオプションメニューから **Refresh Connection** を選び、確認画面の同名のボタンを押して終了します。GlobalProtect は現在の接続を切断して接続し直すため、認証が必要な場合はブラウザで完了してください。更新後の接続状態は `gpctl status` で確認できます。
 
 ### 接続状態を確認する
 
@@ -208,6 +218,7 @@ gpctl toggle
 6. 認証画面へ移ってメニューが閉じた場合は、ブラウザのフォーカスを妨げないよう待機を終了します。接続完了は `gpctl status` で確認します。
 
 `gpctl disconnect` は、同様に GlobalProtect の通常の **Disconnect** 操作を実行します。
+`gpctl refresh` は、オプションメニューの **Refresh Connection** を実行します。認証中のブラウザからフォーカスを奪わないよう、実行後は状態をポーリングしません。
 
 このツールは、通常の接続または切断のために次の操作を行いません。
 
