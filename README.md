@@ -15,7 +15,7 @@
 - CLI から GlobalProtect を切断
 - 現在の接続状態を表示
 - 接続・切断を自動的に切り替える `toggle`
-- 接続完了またはタイムアウトまで待機
+- メニュー表示中は接続完了またはタイムアウトまで待機
 - SAML や MFA が必要な場合は、GlobalProtect またはブラウザ上の認証フローへ引き継ぎ
 - パスワードやセッショントークンを保存しない
 - PanGPS/PanGPA を強制終了せず、通常の GlobalProtect UI 操作として処理
@@ -102,7 +102,7 @@ gpctl <command> [options]
 
 | Option | Description |
 |---|---|
-| `--timeout <seconds>` | 状態遷移を待機する最大秒数を指定します。 |
+| `--timeout <seconds>` | メニュー表示中に状態遷移を待機する最大秒数を指定します。 |
 | `--verbose` | UI 検出や状態判定の詳細ログを表示します。 |
 | `--no-wait` | 接続または切断操作を開始した時点で終了します。 |
 
@@ -114,16 +114,16 @@ gpctl <command> [options]
 gpctl connect
 ```
 
-認証が必要な場合は、GlobalProtect またはブラウザで認証を完了します。
+認証が必要な場合は、GlobalProtect またはブラウザで認証を完了します。認証画面へ移って GlobalProtect のメニューが閉じた場合、`gpctl` は操作を妨げないよう待機を終了します。認証後に `gpctl status` で接続を確認してください。
+この場合、`gpctl connect` の終了コード `0` は接続操作の開始を示し、接続完了は示しません。
 
 ```text
 Opening GlobalProtect...
-Authentication is required. Complete sign-in in GlobalProtect or your browser.
 Waiting for connection...
-Connected.
+Connection started. Check 'gpctl status' after sign-in.
 ```
 
-### 60 秒以内に接続できなければエラーにする
+### メニュー表示中の接続待機を 60 秒にする
 
 ```bash
 gpctl connect --timeout 60
@@ -204,8 +204,8 @@ gpctl toggle
 2. GlobalProtect が起動していなければ起動します。
 3. `osascript` と `System Events` を使用して GlobalProtect の UI 状態を取得します。
 4. 接続可能な状態であれば、GlobalProtect の **Connect** 操作を実行します。
-5. SAML や MFA が必要な場合は、公式の認証フローが完了するまで待機します。
-6. GlobalProtect が接続済みと判定されるまで状態を監視します。
+5. メニューが表示されている間は、メニューを再度開かずに接続状態を監視します。
+6. 認証画面へ移ってメニューが閉じた場合は、ブラウザのフォーカスを妨げないよう待機を終了します。接続完了は `gpctl status` で確認します。
 
 `gpctl disconnect` は、同様に GlobalProtect の通常の **Disconnect** 操作を実行します。
 

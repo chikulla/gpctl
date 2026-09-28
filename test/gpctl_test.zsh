@@ -22,7 +22,8 @@ if [[ -f $FAKE_DIR/osascript_error ]]; then
   exit 1
 fi
 case $2 in
-  dump)
+  dump | peek)
+    print -r -- "$2" >> "$FAKE_DIR/reads"
     count=$(( $(cat "$FAKE_DIR/dump_count" 2>/dev/null || echo 0) + 1 ))
     echo $count > "$FAKE_DIR/dump_count"
     dump_file=$FAKE_DIR/dumps/$count
@@ -101,6 +102,18 @@ test_connect_clicks_and_waits_until_connected() {
   assert_eq "connect: exit code" 0 "$exit_code"
   assert_eq "connect: clicks Connect" "Connect" "$(clicks)"
   assert_eq "connect: prints result" "Connected." "$stdout"
+  assert_eq "connect: polling does not reopen menu" $'dump\npeek\npeek' "$(cat "$FAKE_DIR/reads")"
+  teardown
+}
+
+test_connect_stops_polling_when_popover_closes() {
+  setup
+  set_dumps "text:Not Connected" "text:Connecting..." "popover-closed"
+  run_gpctl connect
+  assert_eq "connect (browser authentication): exit code" 0 "$exit_code"
+  assert_eq "connect (browser authentication): clicks Connect once" "Connect" "$(clicks)"
+  assert_eq "connect (browser authentication): stops polling when menu closes" $'dump\npeek\npeek' "$(cat "$FAKE_DIR/reads")"
+  assert_eq "connect (browser authentication): reports pending connection" "Connection started. Check 'gpctl status' after sign-in." "$stdout"
   teardown
 }
 
@@ -189,6 +202,7 @@ test_embedded_applescript_compiles() {
 
 test_status_classification
 test_connect_clicks_and_waits_until_connected
+test_connect_stops_polling_when_popover_closes
 test_connect_when_already_connected_does_not_click
 test_connect_times_out
 test_connect_no_wait_does_not_poll

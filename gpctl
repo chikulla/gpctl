@@ -33,7 +33,7 @@ Commands:
   version      Show the version
 
 Options:
-  --timeout <seconds>  Maximum seconds to wait for the state change (default: 120)
+  --timeout <seconds>  Maximum seconds to wait while the menu is open (default: 120)
   --verbose            Show UI detection and state details
   --no-wait            Exit right after starting connect / disconnect
 USAGE
@@ -58,6 +58,7 @@ log_verbose() {
 # GlobalProtect のメニューバーのポップオーバーを開き、UI 要素を操作する。
 # mode:
 #   dump          静的テキストとボタンを "text:<値>" / "button:<ラベル>" の行で出力する
+#   peek          ポップオーバーが開いている場合だけ UI 要素を出力する
 #   click <label> ラベルが一致するボタンを押す
 #   close         ポップオーバーが開いていれば閉じる
 run_ui_script() {
@@ -71,6 +72,7 @@ on run argv
 				if (count of windows) > 0 then click menu bar item 1 of menu bar 2
 				return ""
 			end if
+			if mode is "peek" and (count of windows) is 0 then return "popover-closed"
 			if (count of windows) is 0 then
 				click menu bar item 1 of menu bar 2
 				repeat 20 times
@@ -82,7 +84,7 @@ on run argv
 			set uiElements to entire contents of window 1
 		end tell
 	end tell
-	if mode is "dump" then return my dumpElements(uiElements)
+	if mode is "dump" or mode is "peek" then return my dumpElements(uiElements)
 	if mode is "click" then return my clickButton(uiElements, item 2 of argv)
 	error "Unknown mode: " & mode
 end run
@@ -176,8 +178,12 @@ classify_state() {
 
 read_state() {
   local dump state
-  dump=$(run_ui_script dump) || exit $?
+  dump=$(run_ui_script "${1:-dump}") || exit $?
   log_verbose "UI elements:"$'\n'"$dump"
+  if [[ $dump == popover-closed ]]; then
+    print hidden
+    return 0
+  fi
   state=$(classify_state "$dump")
   log_verbose "state: $state"
   print -r -- "$state"
@@ -203,13 +209,21 @@ ensure_app_running() {
 
 wait_until_state() {
   local target_state=$1
+  local read_mode=${2:-dump}
   local deadline=$(( SECONDS + timeout_seconds ))
   local state auth_message_shown=false
 
   while (( SECONDS < deadline )); do
     sleep $POLL_INTERVAL_SECONDS
-    state=$(read_state) || exit $?
-    [[ $state == $target_state ]] && return 0
+    state=$(read_state "$read_mode") || exit $?
+    if [[ $state == $target_state ]]; then
+      print -r -- "$state"
+      return 0
+    fi
+    if [[ $read_mode == peek && $state == hidden ]]; then
+      print hidden
+      return 0
+    fi
     if [[ $state == authentication-required && $auth_message_shown == false ]]; then
       info "$AUTH_MESSAGE"
       auth_message_shown=true
@@ -249,7 +263,12 @@ cmd_connect() {
   fi
 
   info "Waiting for connection..."
-  wait_until_state connected
+  local final_state
+  final_state=$(wait_until_state connected peek) || exit $?
+  if [[ $final_state == hidden ]]; then
+    print "Connection started. Check 'gpctl status' after sign-in."
+    return 0
+  fi
   close_popover
   print "Connected."
 }
@@ -285,7 +304,7 @@ cmd_disconnect() {
   fi
 
   info "Waiting for disconnection..."
-  wait_until_state disconnected
+  wait_until_state disconnected >/dev/null
   close_popover
   print "Disconnected."
 }
