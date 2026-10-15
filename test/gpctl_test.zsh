@@ -93,6 +93,18 @@ test_status_classification() {
     $'text:Not Connected\nbutton:Sign In'     authentication-required 1
     "button:Disconnect"                       connected               0
     "button:Connect"                          disconnected            1
+    "text:接続済み"                            connected               0
+    $'text:未接続\nbutton:接続'               disconnected            1
+    "text:接続中..."                           connecting              1
+    "text:切断中..."                           disconnecting           1
+    $'text:未接続\nbutton:サインイン'       authentication-required 1
+    "button:切断"                             connected               0
+    "button:接続"                             disconnected            1
+    $'text:接続済み\ntext:切断するには管理者に連絡' connected 0
+    $'text:接続済み\ntext:認証済み'          connected               0
+    $'text:Connected\ntext:Authentication succeeded' connected 0
+    $'text:Connected\ntext:Not Connected' unknown 6
+    $'text:Connected\nbutton:Sign In' unknown 6
     "text:GlobalProtect"                      unknown                 6
   )
   local dump expected_state expected_code
@@ -106,25 +118,47 @@ test_status_classification() {
   done
 }
 
-test_connect_clicks_and_waits_until_connected() {
+test_connect_reads_once_and_clicks_once() {
   setup
-  set_dumps "text:Not Connected" "text:Connecting..." "text:Connected"
+  set_dumps $'text:Not Connected\nbutton:Connect' "text:Connected"
   run_gpctl connect
   assert_eq "connect: exit code" 0 "$exit_code"
   assert_eq "connect: clicks Connect" "Connect" "$(clicks)"
-  assert_eq "connect: prints result" "Connected." "$stdout"
-  assert_eq "connect: polling does not reopen menu" $'dump\npeek\npeek' "$(cat "$FAKE_DIR/reads")"
+  assert_eq "connect: reports operation started" "Connection started. Check 'gpctl status' to confirm it." "$stdout"
+  assert_eq "connect: one read and one click" $'dump\nclick' "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
-test_connect_stops_polling_when_popover_closes() {
+test_connect_uses_japanese_button_label() {
   setup
-  set_dumps "text:Not Connected" "text:Connecting..." "popover-closed"
+  set_dumps $'text:未接続\nbutton:接続' "text:接続済み"
   run_gpctl connect
-  assert_eq "connect (browser authentication): exit code" 0 "$exit_code"
-  assert_eq "connect (browser authentication): clicks Connect once" "Connect" "$(clicks)"
-  assert_eq "connect (browser authentication): stops polling when menu closes" $'dump\npeek\npeek' "$(cat "$FAKE_DIR/reads")"
-  assert_eq "connect (browser authentication): reports pending connection" "Connection started. Check 'gpctl status' after sign-in." "$stdout"
+  assert_eq "connect (Japanese UI): exit code" 0 "$exit_code"
+  assert_eq "connect (Japanese UI): clicks 接続" "接続" "$(clicks)"
+  assert_eq "connect (Japanese UI): reports operation started" "Connection started. Check 'gpctl status' to confirm it." "$stdout"
+  assert_eq "connect (Japanese UI): one read and one click" $'dump\nclick' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_disconnect_reads_once_and_clicks_once() {
+  setup
+  set_dumps $'text:Connected\nbutton:Disconnect' "text:Not Connected"
+  run_gpctl disconnect
+  assert_eq "disconnect: exit code" 0 "$exit_code"
+  assert_eq "disconnect: clicks Disconnect" "Disconnect" "$(clicks)"
+  assert_eq "disconnect: reports operation started" "Disconnection started. Check 'gpctl status' to confirm it." "$stdout"
+  assert_eq "disconnect: one read and one click" $'dump\nclick' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_disconnect_uses_japanese_button_label() {
+  setup
+  set_dumps $'text:接続済み\nbutton:切断' "text:未接続"
+  run_gpctl disconnect
+  assert_eq "disconnect (Japanese UI): exit code" 0 "$exit_code"
+  assert_eq "disconnect (Japanese UI): clicks 切断" "切断" "$(clicks)"
+  assert_eq "disconnect (Japanese UI): reports operation started" "Disconnection started. Check 'gpctl status' to confirm it." "$stdout"
+  assert_eq "disconnect (Japanese UI): one read and one click" $'dump\nclick' "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
@@ -134,24 +168,27 @@ test_connect_when_already_connected_does_not_click() {
   run_gpctl connect
   assert_eq "connect (already): exit code" 0 "$exit_code"
   assert_eq "connect (already): no click" "" "$(clicks)"
+  assert_eq "connect (already): one read" "dump" "$(cat "$FAKE_DIR/reads")"
   teardown
 }
 
-test_connect_times_out() {
+test_connect_does_not_click_while_connecting() {
   setup
-  set_dumps "text:Not Connected"
-  run_gpctl connect --timeout 1
-  assert_eq "connect timeout: exit code" 5 "$exit_code"
+  set_dumps $'text:Connecting...\nbutton:Connect' "text:Connected"
+  run_gpctl connect
+  assert_eq "connect (connecting with Connect button): exit code" 1 "$exit_code"
+  assert_eq "connect (connecting with Connect button): no click" "" "$(clicks)"
+  assert_eq "connect (connecting with Connect button): one read" "dump" "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
-test_connect_no_wait_does_not_poll() {
+test_disconnect_does_not_click_while_disconnecting() {
   setup
-  set_dumps "text:Not Connected"
-  run_gpctl connect --no-wait
-  assert_eq "connect --no-wait: exit code" 0 "$exit_code"
-  assert_eq "connect --no-wait: clicks Connect" "Connect" "$(clicks)"
-  assert_eq "connect --no-wait: reads state once" 1 "$(cat "$FAKE_DIR/dump_count")"
+  set_dumps "text:Disconnecting..."
+  run_gpctl disconnect
+  assert_eq "disconnect (disconnecting): exit code" 1 "$exit_code"
+  assert_eq "disconnect (disconnecting): no click" "" "$(clicks)"
+  assert_eq "disconnect (disconnecting): one read" "dump" "$(cat "$FAKE_DIR/reads")"
   teardown
 }
 
@@ -177,19 +214,33 @@ test_refresh_fails_if_confirmation_is_not_clicked() {
 
 test_toggle_disconnects_when_connected() {
   setup
-  set_dumps "text:Connected" "text:Connected" "text:Not Connected"
+  set_dumps $'text:Connected\nbutton:Disconnect' "text:Not Connected"
   run_gpctl toggle
   assert_eq "toggle (connected): exit code" 0 "$exit_code"
   assert_eq "toggle (connected): clicks Disconnect" "Disconnect" "$(clicks)"
+  assert_eq "toggle (connected): reports operation started" "Disconnection started. Check 'gpctl status' to confirm it." "$stdout"
+  assert_eq "toggle (connected): one read and one click" $'dump\nclick' "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
 test_toggle_connects_when_disconnected() {
   setup
-  set_dumps "text:Not Connected" "text:Not Connected" "text:Connected"
+  set_dumps $'text:Not Connected\nbutton:Connect' "text:Connected"
   run_gpctl toggle
   assert_eq "toggle (disconnected): exit code" 0 "$exit_code"
   assert_eq "toggle (disconnected): clicks Connect" "Connect" "$(clicks)"
+  assert_eq "toggle (disconnected): reports operation started" "Connection started. Check 'gpctl status' to confirm it." "$stdout"
+  assert_eq "toggle (disconnected): one read and one click" $'dump\nclick' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_toggle_does_not_click_while_connecting() {
+  setup
+  set_dumps $'text:接続中...\nbutton:接続' "text:接続済み"
+  run_gpctl toggle
+  assert_eq "toggle (connecting with Connect button): exit code" 1 "$exit_code"
+  assert_eq "toggle (connecting with Connect button): no click" "" "$(clicks)"
+  assert_eq "toggle (connecting with Connect button): one read" "dump" "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
@@ -199,10 +250,12 @@ test_invalid_arguments() {
   assert_eq "no command: exit code" 2 "$exit_code"
   run_gpctl unknown
   assert_eq "unknown command: exit code" 2 "$exit_code"
-  run_gpctl connect --timeout abc
-  assert_eq "non-numeric timeout: exit code" 2 "$exit_code"
+  run_gpctl connect --timeout 1
+  assert_eq "removed --timeout option: exit code" 2 "$exit_code"
   run_gpctl connect --timeout
-  assert_eq "missing timeout value: exit code" 2 "$exit_code"
+  assert_eq "removed --timeout without value: exit code" 2 "$exit_code"
+  run_gpctl connect --no-wait
+  assert_eq "removed --no-wait option: exit code" 2 "$exit_code"
   run_gpctl connect --unknown
   assert_eq "unknown option: exit code" 2 "$exit_code"
   teardown
@@ -224,6 +277,14 @@ test_permission_error() {
   teardown
 }
 
+test_closed_window_is_not_a_permission_error() {
+  setup
+  print 'execution error: System Events got an error: Can’t get window 1 of application process "GlobalProtect". Invalid index. (-1719)' > "$FAKE_DIR/osascript_error"
+  run_gpctl status
+  assert_eq "closed window: exit code" 6 "$exit_code"
+  teardown
+}
+
 test_embedded_applescript_compiles() {
   local compiled=$(mktemp -d)/gpctl.scpt
   sed -n "/<<'APPLESCRIPT'/,/^APPLESCRIPT\$/p" "$GPCTL" | sed '1d;$d' | osacompile -o "$compiled" 2>/dev/null
@@ -232,18 +293,22 @@ test_embedded_applescript_compiles() {
 }
 
 test_status_classification
-test_connect_clicks_and_waits_until_connected
-test_connect_stops_polling_when_popover_closes
+test_connect_reads_once_and_clicks_once
+test_connect_uses_japanese_button_label
+test_disconnect_reads_once_and_clicks_once
+test_disconnect_uses_japanese_button_label
 test_connect_when_already_connected_does_not_click
-test_connect_times_out
-test_connect_no_wait_does_not_poll
+test_connect_does_not_click_while_connecting
+test_disconnect_does_not_click_while_disconnecting
 test_refresh_uses_native_menu_without_polling
 test_refresh_fails_if_confirmation_is_not_clicked
 test_toggle_disconnects_when_connected
 test_toggle_connects_when_disconnected
+test_toggle_does_not_click_while_connecting
 test_invalid_arguments
 test_app_not_found
 test_permission_error
+test_closed_window_is_not_a_permission_error
 test_embedded_applescript_compiles
 
 if (( failures > 0 )); then

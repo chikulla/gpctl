@@ -3,22 +3,18 @@
 
 set -u
 
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly APP_PATH="${GPCTL_APP_PATH:-/Applications/GlobalProtect.app}"
 readonly PROCESS_NAME="GlobalProtect"
-readonly POLL_INTERVAL_SECONDS=1
 readonly AUTH_MESSAGE="Authentication is required. Complete sign-in in GlobalProtect or your browser."
 
 readonly EXIT_FAILURE=1
 readonly EXIT_USAGE=2
 readonly EXIT_APP_NOT_AVAILABLE=3
 readonly EXIT_PERMISSION=4
-readonly EXIT_TIMEOUT=5
 readonly EXIT_UNKNOWN_STATE=6
 
-timeout_seconds=120
 verbose=false
-no_wait=false
 
 usage() {
   cat <<'USAGE'
@@ -34,9 +30,7 @@ Commands:
   version      Show the version
 
 Options:
-  --timeout <seconds>  Maximum seconds to wait while the menu is open (default: 120)
   --verbose            Show UI detection and state details
-  --no-wait            Exit right after starting connect / disconnect
 USAGE
 }
 
@@ -59,41 +53,55 @@ log_verbose() {
 # GlobalProtect のメニューバーのポップオーバーを開き、UI 要素を操作する。
 # mode:
 #   dump          静的テキストとボタンを "text:<値>" / "button:<ラベル>" の行で出力する
-#   peek          ポップオーバーが開いている場合だけ UI 要素を出力する
 #   click <label> ラベルが一致するボタンを押す
 #   refresh-menu  オプションメニューの Refresh Connection を押す
 #   refresh-confirm 確認画面の Refresh Connection ボタンを押す
-#   close         ポップオーバーが開いていれば閉じる
 run_ui_script() {
   local output exit_status
   output=$(osascript - "$@" 2>&1 <<'APPLESCRIPT'
 on run argv
+	with timeout of 10 seconds
 	set mode to item 1 of argv
+	if mode is "refresh-confirm" then return my clickRefreshConfirmation()
 	tell application "System Events"
 		tell process "GlobalProtect"
-			if mode is "close" then
-				if (count of windows) > 0 then click menu bar item 1 of menu bar 2
-				return ""
-			end if
-			if mode is "peek" and (count of windows) is 0 then return "popover-closed"
-			if mode is "refresh-confirm" and (count of windows) is 0 then error "UI element not found: Refresh Connection confirmation window" number 1001
-			if (count of windows) is 0 then
+			set uiElements to my findPopoverElements()
+			if uiElements is missing value then
+				if mode is "click" then error "UI element not found: GlobalProtect popover closed" number 1001
 				click menu bar item 1 of menu bar 2
-				repeat 20 times
-					if (count of windows) > 0 then exit repeat
-					delay 0.1
+				repeat 10 times
+					delay 0.2
+					set uiElements to my findPopoverElements()
+					if uiElements is not missing value then exit repeat
 				end repeat
 			end if
-			if (count of windows) is 0 then error "UI element not found: GlobalProtect window" number 1001
-			set uiElements to entire contents of window 1
+			if uiElements is missing value then error "UI element not found: GlobalProtect popover" number 1001
 		end tell
 	end tell
-	if mode is "dump" or mode is "peek" then return my dumpElements(uiElements)
+	if mode is "dump" then return my dumpElements(uiElements)
 	if mode is "click" then return my clickButton(uiElements, item 2 of argv)
 	if mode is "refresh-menu" then return my clickRefreshMenuItem(uiElements)
-	if mode is "refresh-confirm" then return my clickRefreshConfirmation()
 	error "Unknown mode: " & mode
+	end timeout
 end run
+
+on findPopoverElements()
+	tell application "System Events"
+		tell process "GlobalProtect"
+			repeat with candidateWindow in windows
+				try
+					set candidateElements to entire contents of candidateWindow
+					repeat with e in candidateElements
+						try
+							if role of e is "AXPopUpButton" and value of attribute "AXIdentifier" of e is "gp.menu.options" then return candidateElements
+						end try
+					end repeat
+				end try
+			end repeat
+		end tell
+	end tell
+	return missing value
+end findPopoverElements
 
 on dumpElements(uiElements)
 	set output to {}
@@ -132,7 +140,6 @@ end clickButton
 
 on clickRefreshMenuItem(uiElements)
 	set optionsButton to missing value
-	set menuItemClicked to false
 	tell application "System Events"
 		repeat with e in uiElements
 			try
@@ -143,49 +150,51 @@ on clickRefreshMenuItem(uiElements)
 			end try
 		end repeat
 		if optionsButton is missing value then error "UI element not found: GlobalProtect options menu" number 1001
-		click optionsButton
-		set visibleMenuItems to {}
-		repeat 20 times
-			set visibleMenuItems to {}
-			try
-				set menuElements to entire contents of process "GlobalProtect"
-			on error
-				set menuElements to {}
-			end try
-			repeat with menuItem in menuElements
-				try
-					if role of menuItem is "AXMenuItem" then
-						set label_ to my textOf(name of menuItem)
-						set end of visibleMenuItems to label_
-						set identifier_ to ""
-						try
-							set identifier_ to my textOf(value of attribute "AXIdentifier" of menuItem)
-						end try
-						if identifier_ is "gp.menu.refresh" or label_ is "Refresh Connection" or label_ is "接続を更新" then
-							click menuItem
-							set menuItemClicked to true
-							exit repeat
-						end if
-						end if
-				end try
+		set refreshMenuItem to my findRefreshMenuItem(optionsButton)
+		if refreshMenuItem is missing value then
+			click optionsButton
+			repeat 6 times
+				delay 0.25
+				set refreshMenuItem to my findRefreshMenuItem(optionsButton)
+				if refreshMenuItem is not missing value then exit repeat
 			end repeat
-			if menuItemClicked then exit repeat
-			delay 0.1
-		end repeat
-		if not menuItemClicked then error "UI element not found: Refresh Connection (visible menu items: " & visibleMenuItems & ")" number 1001
+		end if
+		if refreshMenuItem is missing value then error "UI element not found: Refresh Connection menu item" number 1001
+		click refreshMenuItem
+		return ""
 	end tell
-	return ""
 end clickRefreshMenuItem
+
+on findRefreshMenuItem(optionsButton)
+	tell application "System Events"
+		try
+			set menuElements to entire contents of optionsButton
+		on error
+			return missing value
+		end try
+		repeat with menuItem in menuElements
+			try
+				if role of menuItem is "AXMenuItem" then
+					set label_ to my textOf(name of menuItem)
+					set identifier_ to ""
+					try
+						set identifier_ to my textOf(value of attribute "AXIdentifier" of menuItem)
+					end try
+					if identifier_ is "gp.menu.refresh" or label_ is "Refresh Connection" or label_ is "接続を更新" then return menuItem
+				end if
+			end try
+		end repeat
+	end tell
+	return missing value
+end findRefreshMenuItem
 
 on clickRefreshConfirmation()
 	tell application "System Events"
-		set confirmationShown to false
-		repeat 50 times
-			try
-				set refreshElements to entire contents of process "GlobalProtect"
-			on error
-				set refreshElements to {}
-			end try
+		repeat 6 times
+			delay 0.5
+			set confirmationShown to false
+			set refreshButton to missing value
+			set refreshElements to entire contents of process "GlobalProtect"
 			repeat with e in refreshElements
 				try
 					set elementRole to role of e
@@ -194,18 +203,17 @@ on clickRefreshConfirmation()
 						if message_ contains "Refresh?" or message_ contains "更新?" then set confirmationShown to true
 					else if elementRole is "AXButton" then
 						set label_ to my buttonText(e)
-						if label_ is "Refresh Connection" or label_ is "接続を更新" then
-							click e
-							return ""
-						end if
+						if label_ is "Refresh Connection" or label_ is "接続を更新" then set refreshButton to e
 					end if
 				end try
 			end repeat
-			delay 0.1
+			if confirmationShown and refreshButton is not missing value then
+				click refreshButton
+				return ""
+			end if
 		end repeat
 	end tell
-	if confirmationShown then error "UI element not found: Refresh Connection confirmation button" number 1001
-	error "Could not confirm Refresh Connection" number 1001
+	error "UI element not found: Refresh Connection confirmation" number 1001
 end clickRefreshConfirmation
 
 on buttonText(e)
@@ -229,8 +237,8 @@ APPLESCRIPT
   fi
 
   log_verbose "osascript failed: $output"
-  # -1719: assistive access がない / -1743: Apple events の送信が許可されていない
-  if [[ $output == *"-1719"* || $output == *"-1743"* || $output == *"assistive access"* || $output == *"Not authorized"* ]]; then
+  # -1719 はウィンドウ消失でも返るため、番号だけで権限エラーと判断しない。
+  if [[ $output == *"-1743"* || $output == *"assistive access"* || $output == *"Not authorized"* ]]; then
     die $EXIT_PERMISSION "Accessibility / Automation permission is missing. See 'macOS Permissions' in README.
 $output"
   fi
@@ -238,44 +246,77 @@ $output"
 $output"
 }
 
-# "disconnecting" や "not connected" は "connected" を含むため、"text:" 接頭辞付きで照合し、判定順も固定する
+# 説明文の「切断」「認証」などを状態と誤認しないよう、UI の行単位でラベルを照合する。
 classify_state() {
-  local dump=${(L)1}
-  if [[ $dump == *"button:sign in"* || $dump == *"text:authentication"* ]]; then
+  local dump=${(L)1} line
+  local authentication=false disconnecting=false connecting=false connected=false disconnected=false
+  local connect_button=false disconnect_button=false
+  for line in ${(f)dump}; do
+    case $line in
+      (button:sign\ in|button:サインイン|text:authentication|text:authentication\ failed|text:認証が必要|text:認証失敗) authentication=true ;;
+      (text:disconnecting|text:disconnecting...|text:切断中|text:切断中...|text:切断中…) disconnecting=true ;;
+      (text:connecting|text:connecting...|text:接続中|text:接続中...|text:接続中…) connecting=true ;;
+      (text:connected|text:接続済み|text:connected\ -\ internal|text:内部接続) connected=true ;;
+      (text:not\ connected|text:disconnected|text:未接続|text:切断) disconnected=true ;;
+      (button:disconnect|button:切断) disconnect_button=true ;;
+      (button:connect|button:接続) connect_button=true ;;
+    esac
+  done
+  if [[ $connected == true && ( $disconnected == true || $authentication == true ) ]]; then
+    print unknown
+  elif [[ $authentication == true ]]; then
     print authentication-required
-  elif [[ $dump == *"text:disconnecting"* ]]; then
+  elif [[ $disconnecting == true ]]; then
     print disconnecting
-  elif [[ $dump == *"text:connecting"* ]]; then
+  elif [[ $connecting == true ]]; then
     print connecting
-  elif [[ $dump == *"text:not connected"* || $dump == *"text:disconnected"* ]]; then
+  elif [[ $connected == true ]]; then
+    print connected
+  elif [[ $disconnected == true ]]; then
     print disconnected
-  elif [[ $dump == *"text:connected"* ]]; then
+  elif [[ $disconnect_button == true ]]; then
     print connected
-  elif [[ $dump == *"button:disconnect"* ]]; then
-    print connected
-  elif [[ $dump == *"button:connect"* ]]; then
+  elif [[ $connect_button == true ]]; then
     print disconnected
   else
     print unknown
   fi
 }
 
-read_state() {
-  local dump state
-  dump=$(run_ui_script "${1:-dump}") || exit $?
-  log_verbose "UI elements:"$'\n'"$dump"
-  if [[ $dump == popover-closed ]]; then
-    print hidden
-    return 0
-  fi
-  state=$(classify_state "$dump")
-  log_verbose "state: $state"
-  print -r -- "$state"
+button_label_from_dump() {
+  local dump=$1 action=$2 localized_action line
+  case $action in
+    Connect) localized_action=接続 ;;
+    Disconnect) localized_action=切断 ;;
+  esac
+  for line in ${(f)dump}; do
+    if [[ $line == "button:$action" || $line == "button:$localized_action" ]]; then
+      print -r -- "${line#button:}"
+      return 0
+    fi
+  done
+  print -r -- "$action"
 }
 
-# 閉じられなくても接続・切断の結果は変わらないため、失敗は無視する
-close_popover() {
-  (run_ui_script close) >/dev/null 2>&1
+read_state() {
+  local dump state
+  dump=$(run_ui_script dump) || exit $?
+  log_verbose "UI elements:"$'\n'"$dump"
+  state=$(classify_state "$dump")
+  log_verbose "state: $state"
+  if [[ -n ${1:-} ]]; then
+    local action=$1
+    if [[ $action == Toggle ]]; then
+      if [[ $state == connected ]]; then
+        action=Disconnect
+      else
+        action=Connect
+      fi
+    fi
+    print -r -- "$state|$(button_label_from_dump "$dump" "$action")"
+  else
+    print -r -- "$state"
+  fi
 }
 
 ensure_app_running() {
@@ -291,46 +332,32 @@ ensure_app_running() {
   die $EXIT_APP_NOT_AVAILABLE "GlobalProtect did not start."
 }
 
-wait_until_state() {
-  local target_state=$1
-  local read_mode=${2:-dump}
-  local deadline=$(( SECONDS + timeout_seconds ))
-  local state auth_message_shown=false
-
-  while (( SECONDS < deadline )); do
-    sleep $POLL_INTERVAL_SECONDS
-    state=$(read_state "$read_mode") || exit $?
-    if [[ $state == $target_state ]]; then
-      print -r -- "$state"
-      return 0
-    fi
-    if [[ $read_mode == peek && $state == hidden ]]; then
-      print hidden
-      return 0
-    fi
-    if [[ $state == authentication-required && $auth_message_shown == false ]]; then
-      info "$AUTH_MESSAGE"
-      auth_message_shown=true
-    fi
-  done
-  die $EXIT_TIMEOUT "Timed out after ${timeout_seconds} seconds waiting for $target_state."
-}
-
 cmd_connect() {
-  ensure_app_running
-  local state
-  state=$(read_state) || exit $?
+  local state_and_button state button_label
+  if (( $# > 0 )); then
+    state_and_button=$1
+  else
+    ensure_app_running
+    state_and_button=$(read_state Connect) || exit $?
+  fi
+  state=${state_and_button%%|*}
+  button_label=${state_and_button#*|}
 
   case $state in
     connected)
-      close_popover
       print "Already connected."
       return 0
       ;;
     disconnected)
-      run_ui_script click Connect >/dev/null
+      run_ui_script click "$button_label" >/dev/null
+      print "Connection started. Check 'gpctl status' to confirm it."
+      return 0
       ;;
-    connecting | authentication-required)
+    connecting)
+      die $EXIT_FAILURE "GlobalProtect reports Connecting; no action taken. Check 'gpctl status' later."
+      ;;
+    authentication-required)
+      die $EXIT_FAILURE "$AUTH_MESSAGE"
       ;;
     disconnecting)
       die $EXIT_FAILURE "GlobalProtect is disconnecting. Try again later."
@@ -339,39 +366,31 @@ cmd_connect() {
       die $EXIT_UNKNOWN_STATE "Could not determine GlobalProtect state. Run with --verbose for details."
       ;;
   esac
-
-  if [[ $no_wait == true ]]; then
-    close_popover
-    print "Connection started."
-    return 0
-  fi
-
-  info "Waiting for connection..."
-  local final_state
-  final_state=$(wait_until_state connected peek) || exit $?
-  if [[ $final_state == hidden ]]; then
-    print "Connection started. Check 'gpctl status' after sign-in."
-    return 0
-  fi
-  close_popover
-  print "Connected."
 }
 
 cmd_disconnect() {
-  ensure_app_running
-  local state
-  state=$(read_state) || exit $?
+  local state_and_button state button_label
+  if (( $# > 0 )); then
+    state_and_button=$1
+  else
+    ensure_app_running
+    state_and_button=$(read_state Disconnect) || exit $?
+  fi
+  state=${state_and_button%%|*}
+  button_label=${state_and_button#*|}
 
   case $state in
     disconnected)
-      close_popover
       print "Already disconnected."
       return 0
       ;;
     connected)
-      run_ui_script click Disconnect >/dev/null
+      run_ui_script click "$button_label" >/dev/null
+      print "Disconnection started. Check 'gpctl status' to confirm it."
+      return 0
       ;;
     disconnecting)
+      die $EXIT_FAILURE "GlobalProtect reports Disconnecting; no action taken. Check 'gpctl status' later."
       ;;
     connecting | authentication-required)
       die $EXIT_FAILURE "GlobalProtect is connecting. Try again later."
@@ -380,17 +399,6 @@ cmd_disconnect() {
       die $EXIT_UNKNOWN_STATE "Could not determine GlobalProtect state. Run with --verbose for details."
       ;;
   esac
-
-  if [[ $no_wait == true ]]; then
-    close_popover
-    print "Disconnection started."
-    return 0
-  fi
-
-  info "Waiting for disconnection..."
-  wait_until_state disconnected >/dev/null
-  close_popover
-  print "Disconnected."
 }
 
 cmd_refresh() {
@@ -404,7 +412,6 @@ cmd_status() {
   ensure_app_running
   local state
   state=$(read_state) || exit $?
-  close_popover
   print -r -- "$state"
 
   case $state in
@@ -416,12 +423,13 @@ cmd_status() {
 
 cmd_toggle() {
   ensure_app_running
-  local state
-  state=$(read_state) || exit $?
+  local state_and_button state
+  state_and_button=$(read_state Toggle) || exit $?
+  state=${state_and_button%%|*}
   if [[ $state == connected ]]; then
-    cmd_disconnect
+    cmd_disconnect "$state_and_button"
   else
-    cmd_connect
+    cmd_connect "$state_and_button"
   fi
 }
 
@@ -435,18 +443,8 @@ main() {
   shift
   while (( $# > 0 )); do
     case $1 in
-      --timeout)
-        (( $# >= 2 )) || die $EXIT_USAGE "--timeout requires a value."
-        [[ $2 == <1-> ]] || die $EXIT_USAGE "--timeout must be a positive integer: $2"
-        timeout_seconds=$2
-        shift 2
-        ;;
       --verbose)
         verbose=true
-        shift
-        ;;
-      --no-wait)
-        no_wait=true
         shift
         ;;
       *)

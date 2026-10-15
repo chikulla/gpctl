@@ -16,7 +16,7 @@
 - CLI から GlobalProtect の接続を更新
 - 現在の接続状態を表示
 - 接続・切断を自動的に切り替える `toggle`
-- メニュー表示中は接続完了またはタイムアウトまで待機
+- 接続・切断操作は開始後すぐに終了し、完了したかは `status` で確認
 - SAML や MFA が必要な場合は、GlobalProtect またはブラウザ上の認証フローへ引き継ぎ
 - パスワードやセッショントークンを保存しない
 - PanGPS/PanGPA を強制終了せず、通常の GlobalProtect UI 操作として処理
@@ -92,11 +92,11 @@ gpctl <command> [options]
 
 | Command | Description |
 |---|---|
-| `gpctl connect` | GlobalProtect へ接続します。 |
-| `gpctl disconnect` | GlobalProtect を切断します。 |
+| `gpctl connect` | GlobalProtect の接続操作を開始します。 |
+| `gpctl disconnect` | GlobalProtect の切断操作を開始します。 |
 | `gpctl refresh` | GlobalProtect の **Refresh Connection** を実行します。 |
 | `gpctl status` | 現在の接続状態を表示します。 |
-| `gpctl toggle` | 未接続なら接続し、接続済みなら切断します。 |
+| `gpctl toggle` | 未接続なら接続操作、接続済みなら切断操作を開始します。 |
 | `gpctl help` | ヘルプを表示します。 |
 | `gpctl version` | バージョンを表示します。 |
 
@@ -104,9 +104,7 @@ gpctl <command> [options]
 
 | Option | Description |
 |---|---|
-| `--timeout <seconds>` | メニュー表示中に状態遷移を待機する最大秒数を指定します。 |
 | `--verbose` | UI 検出や状態判定の詳細ログを表示します。 |
-| `--no-wait` | 接続または切断操作を開始した時点で終了します。 |
 
 ## Examples
 
@@ -116,19 +114,11 @@ gpctl <command> [options]
 gpctl connect
 ```
 
-認証が必要な場合は、GlobalProtect またはブラウザで認証を完了します。認証画面へ移って GlobalProtect のメニューが閉じた場合、`gpctl` は操作を妨げないよう待機を終了します。認証後に `gpctl status` で接続を確認してください。
-この場合、`gpctl connect` の終了コード `0` は接続操作の開始を示し、接続完了は示しません。
+`gpctl connect` は接続ボタンを押した時点で終了し、接続完了を待ちません。認証が必要な場合は GlobalProtect またはブラウザで完了し、その後 `gpctl status` で接続を確認してください。終了コード `0` は操作の開始、または既に接続済みであることを示します。
+画面が既に `connecting` と表示されている場合は再操作せず、終了コード `1` で返ります。
 
 ```text
-Opening GlobalProtect...
-Waiting for connection...
-Connection started. Check 'gpctl status' after sign-in.
-```
-
-### メニュー表示中の接続待機を 60 秒にする
-
-```bash
-gpctl connect --timeout 60
+Connection started. Check 'gpctl status' to confirm it.
 ```
 
 ### 切断する
@@ -137,13 +127,15 @@ gpctl connect --timeout 60
 gpctl disconnect
 ```
 
+切断操作を開始した時点で終了します。切断完了は `gpctl status` で確認してください。
+
 ### 接続を更新する
 
 ```bash
 gpctl refresh
 ```
 
-GlobalProtect のオプションメニューから **Refresh Connection** を選び、確認画面の同名のボタンを押して終了します。GlobalProtect は現在の接続を切断して接続し直すため、認証が必要な場合はブラウザで完了してください。更新後の接続状態は `gpctl status` で確認できます。
+GlobalProtect のオプションメニューから **Refresh Connection** を選び、確認画面の同名のボタンを押して終了します。接続し直すまで待たないため、認証が必要な場合はブラウザで完了し、更新後に `gpctl status` で状態を確認してください。
 
 ### 接続状態を確認する
 
@@ -168,7 +160,7 @@ unknown
 if gpctl status >/dev/null 2>&1; then
   echo "GlobalProtect is connected"
 else
-  gpctl connect --timeout 90
+  gpctl connect
 fi
 ```
 
@@ -198,12 +190,11 @@ gpctl toggle
 
 | Code | Meaning |
 |---:|---|
-| `0` | 操作に成功しました。`status` の場合は接続済みです。 |
-| `1` | 操作に失敗しました。`status` の場合は未接続です。 |
+| `0` | 操作を開始したか、既に目的の状態です。`status` の場合は接続済みです。 |
+| `1` | 接続・切断操作を開始しませんでした。`status` の場合は接続済み以外の判定可能な状態です。 |
 | `2` | 引数またはコマンドの指定が不正です。 |
 | `3` | GlobalProtect が見つからない、または起動できません。 |
 | `4` | Accessibility / Automation 権限が不足しています。 |
-| `5` | 指定時間内に目的の状態へ遷移しませんでした。 |
 | `6` | GlobalProtect の状態または UI を判定できませんでした。 |
 
 ## How It Works
@@ -212,13 +203,15 @@ gpctl toggle
 
 1. `/Applications/GlobalProtect.app` の存在を確認します。
 2. GlobalProtect が起動していなければ起動します。
-3. `osascript` と `System Events` を使用して GlobalProtect の UI 状態を取得します。
-4. 接続可能な状態であれば、GlobalProtect の **Connect** 操作を実行します。
-5. メニューが表示されている間は、メニューを再度開かずに接続状態を監視します。
-6. 認証画面へ移ってメニューが閉じた場合は、ブラウザのフォーカスを妨げないよう待機を終了します。接続完了は `gpctl status` で確認します。
+3. `osascript` と `System Events` を使用して GlobalProtect の UI 状態を 1 回取得します。
+4. 接続可能な状態であれば、表示されている **Connect** ボタンを 1 回押します。クリック時にポップオーバーが閉じていた場合は、再表示せずエラーで終了します。
+5. 状態を再取得せずに終了します。接続完了は後から `gpctl status` で確認します。
 
-`gpctl disconnect` は、同様に GlobalProtect の通常の **Disconnect** 操作を実行します。
-`gpctl refresh` は、オプションメニューの **Refresh Connection** を実行します。認証中のブラウザからフォーカスを奪わないよう、実行後は状態をポーリングしません。
+`gpctl disconnect` も状態を 1 回取得し、必要な場合に **Disconnect** ボタンを 1 回押して終了します。`gpctl toggle` は 1 回取得した状態に応じて接続または切断を選びます。
+`gpctl refresh` はオプションメニューの **Refresh Connection** を選び、確認画面のボタンを押して終了します。更新後の接続状態は監視しません。
+
+`status` は GlobalProtect の画面表示を読み取ります。画面が `connecting` のまま固まっている場合、接続処理が進行中とは限りません。
+`status` はポップオーバーを閉じずに戻るため、画面が表示されたままになる場合があります。
 
 このツールは、通常の接続または切断のために次の操作を行いません。
 
@@ -269,9 +262,9 @@ GlobalProtect の画面を手動で開き、次を確認してください。
 - ポータルが設定されているか
 - 管理ポリシーによって操作が制限されていないか
 
-### 接続がタイムアウトする
+### 操作後も接続されない
 
-次を確認してください。
+`gpctl status` で状態を確認し、次を調べてください。
 
 - ブラウザまたは GlobalProtect 内で認証が完了しているか
 - MFA の承認待ちになっていないか
@@ -280,11 +273,7 @@ GlobalProtect の画面を手動で開き、次を確認してください。
 - GlobalProtect のポータルへ到達できるか
 - GlobalProtect 自体にエラーが表示されていないか
 
-タイムアウトだけを延長する場合は、次のように実行します。
-
-```bash
-gpctl connect --timeout 120 --verbose
-```
+UI の状態を詳しく見るには `gpctl status --verbose` を実行します。
 
 ### 切断できない
 
