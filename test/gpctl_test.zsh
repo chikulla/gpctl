@@ -18,10 +18,6 @@ setup() {
 #!/bin/zsh
 cat >/dev/null
 print -r -- "$2" >> "$FAKE_DIR/actions"
-if [[ $2 == refresh-confirm && -f $FAKE_DIR/refresh_confirm_error ]]; then
-  print -r -- "UI element not found: Refresh Connection confirmation button (1001)" >&2
-  exit 1
-fi
 if [[ -f $FAKE_DIR/osascript_error ]]; then
   cat "$FAKE_DIR/osascript_error" >&2
   exit 1
@@ -38,11 +34,17 @@ case $2 in
   click)
     print -r -- "$3" >> "$FAKE_DIR/clicks"
     ;;
-  refresh-menu)
-    print -r -- "Refresh Connection menu item" >> "$FAKE_DIR/clicks"
-    ;;
-  refresh-confirm)
-    print -r -- "Refresh Connection button" >> "$FAKE_DIR/clicks"
+  refresh)
+    [[ -f $FAKE_DIR/refresh_pending ]] || print -r -- "Refresh Connection menu item" >> "$FAKE_DIR/clicks"
+    if [[ -f $FAKE_DIR/refresh_confirm_error ]]; then
+      print -r -- "UI element not found: Refresh Connection confirmation button (1001)" >&2
+      exit 1
+    elif [[ -f $FAKE_DIR/no_refresh_confirmation ]]; then
+      print -r -- "no-confirmation"
+    else
+      print -r -- "Refresh Connection button" >> "$FAKE_DIR/clicks"
+      print -r -- "confirmed"
+    fi
     ;;
 esac
 FAKE
@@ -68,8 +70,9 @@ clicks() {
 }
 
 run_gpctl() {
-  stdout=$("$GPCTL" "$@" 2>/dev/null)
+  stdout=$("$GPCTL" "$@" 2>"$FAKE_DIR/stderr")
   exit_code=$?
+  stderr=$(cat "$FAKE_DIR/stderr")
 }
 
 assert_eq() {
@@ -103,6 +106,8 @@ test_status_classification() {
     $'text:接続済み\ntext:切断するには管理者に連絡' connected 0
     $'text:接続済み\ntext:認証済み'          connected               0
     $'text:Connected\ntext:Authentication succeeded' connected 0
+    $'text:Refresh?\nbutton:Refresh Connection' refresh-confirmation-required 1
+    $'text:接続を更新しますか?\nbutton:接続を更新' refresh-confirmation-required 1
     $'text:Connected\ntext:Not Connected' unknown 6
     $'text:Connected\nbutton:Sign In' unknown 6
     "text:GlobalProtect"                      unknown                 6
@@ -192,23 +197,91 @@ test_disconnect_does_not_click_while_disconnecting() {
   teardown
 }
 
-test_refresh_uses_native_menu_without_polling() {
+test_refresh_with_confirmation() {
   setup
+  set_dumps $'text:Connected\nbutton:Disconnect'
   run_gpctl refresh
-  assert_eq "refresh: exit code" 0 "$exit_code"
-  assert_eq "refresh: selects menu item and confirms" $'Refresh Connection menu item\nRefresh Connection button' "$(clicks)"
-  assert_eq "refresh: prints result" "Connection refresh started." "$stdout"
-  assert_eq "refresh: does not poll connection state" "" "$(cat "$FAKE_DIR/reads" 2>/dev/null)"
-  assert_eq "refresh: touches UI only for both required clicks" $'refresh-menu\nrefresh-confirm' "$(cat "$FAKE_DIR/actions")"
+  assert_eq "refresh (confirmation shown): exit code" 0 "$exit_code"
+  assert_eq "refresh (confirmation shown): selects menu item and confirms" $'Refresh Connection menu item\nRefresh Connection button' "$(clicks)"
+  assert_eq "refresh (confirmation shown): prints result" "Connection refresh started." "$stdout"
+  assert_eq "refresh (confirmation shown): one state read" "dump" "$(cat "$FAKE_DIR/reads")"
+  assert_eq "refresh (confirmation shown): one read and one refresh action" $'dump\nrefresh' "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
-test_refresh_fails_if_confirmation_is_not_clicked() {
+test_refresh_while_connecting() {
   setup
+  set_dumps $'text:Connecting...\nbutton:Connect'
+  run_gpctl refresh
+  assert_eq "refresh (connecting): exit code" 0 "$exit_code"
+  assert_eq "refresh (connecting): selects menu item and confirms" $'Refresh Connection menu item\nRefresh Connection button' "$(clicks)"
+  assert_eq "refresh (connecting): one read and one refresh action" $'dump\nrefresh' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_refresh_with_confirmation_pending() {
+  setup
+  set_dumps $'text:Refresh?\nbutton:Refresh Connection'
+  touch "$FAKE_DIR/refresh_pending"
+  run_gpctl refresh
+  assert_eq "refresh (confirmation pending): exit code" 0 "$exit_code"
+  assert_eq "refresh (confirmation pending): clicks confirmation only" "Refresh Connection button" "$(clicks)"
+  assert_eq "refresh (confirmation pending): prints result" "Connection refresh started." "$stdout"
+  assert_eq "refresh (confirmation pending): one read and one refresh action" $'dump\nrefresh' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_refresh_when_disconnected_does_not_click() {
+  setup
+  set_dumps $'text:Not Connected\nbutton:Connect'
+  run_gpctl refresh
+  assert_eq "refresh (disconnected): exit code" 1 "$exit_code"
+  assert_eq "refresh (disconnected): no click" "" "$(clicks)"
+  assert_eq "refresh (disconnected): no success message" "" "$stdout"
+  assert_eq "refresh (disconnected): advises connect" "gpctl: GlobalProtect is disconnected. Use 'gpctl connect'." "$stderr"
+  assert_eq "refresh (disconnected): one read, no refresh action" "dump" "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_refresh_in_other_states_does_not_click() {
+  local cases=(
+    $'text:Not Connected\nbutton:Sign In' 1
+    "text:Disconnecting..." 1
+    "text:GlobalProtect" 6
+  )
+  local dump expected_code
+  for dump expected_code in "${cases[@]}"; do
+    setup
+    set_dumps "$dump"
+    run_gpctl refresh
+    assert_eq "refresh (${dump//$'\n'/ | }): exit code" "$expected_code" "$exit_code"
+    assert_eq "refresh (${dump//$'\n'/ | }): no click" "" "$(clicks)"
+    assert_eq "refresh (${dump//$'\n'/ | }): one read, no refresh action" "dump" "$(cat "$FAKE_DIR/actions")"
+    teardown
+  done
+}
+
+test_refresh_requires_confirmation() {
+  setup
+  set_dumps "text:Connected"
+  touch "$FAKE_DIR/no_refresh_confirmation"
+  run_gpctl refresh
+  assert_eq "refresh (no confirmation): exit code" 6 "$exit_code"
+  assert_eq "refresh (no confirmation): selects menu item only" "Refresh Connection menu item" "$(clicks)"
+  assert_eq "refresh (no confirmation): no success message" "" "$stdout"
+  assert_eq "refresh (no confirmation): one state read" "dump" "$(cat "$FAKE_DIR/reads")"
+  assert_eq "refresh (no confirmation): one read and one refresh action" $'dump\nrefresh' "$(cat "$FAKE_DIR/actions")"
+  teardown
+}
+
+test_refresh_fails_if_confirmation_click_errors() {
+  setup
+  set_dumps "text:Connected"
   touch "$FAKE_DIR/refresh_confirm_error"
   run_gpctl refresh
-  assert_eq "refresh confirmation failure: exit code" 6 "$exit_code"
-  assert_eq "refresh confirmation failure: no success message" "" "$stdout"
+  assert_eq "refresh confirmation error: exit code" 6 "$exit_code"
+  assert_eq "refresh confirmation error: no success message" "" "$stdout"
+  assert_eq "refresh confirmation error: one read and one refresh action" $'dump\nrefresh' "$(cat "$FAKE_DIR/actions")"
   teardown
 }
 
@@ -300,8 +373,13 @@ test_disconnect_uses_japanese_button_label
 test_connect_when_already_connected_does_not_click
 test_connect_does_not_click_while_connecting
 test_disconnect_does_not_click_while_disconnecting
-test_refresh_uses_native_menu_without_polling
-test_refresh_fails_if_confirmation_is_not_clicked
+test_refresh_with_confirmation
+test_refresh_while_connecting
+test_refresh_with_confirmation_pending
+test_refresh_when_disconnected_does_not_click
+test_refresh_in_other_states_does_not_click
+test_refresh_requires_confirmation
+test_refresh_fails_if_confirmation_click_errors
 test_toggle_disconnects_when_connected
 test_toggle_connects_when_disconnected
 test_toggle_does_not_click_while_connecting

@@ -54,15 +54,13 @@ log_verbose() {
 # mode:
 #   dump          静的テキストとボタンを "text:<値>" / "button:<ラベル>" の行で出力する
 #   click <label> ラベルが一致するボタンを押す
-#   refresh-menu  オプションメニューの Refresh Connection を押す
-#   refresh-confirm 確認画面の Refresh Connection ボタンを押す
+#   refresh       オプションメニューと確認画面の Refresh Connection を各 1 回押す
 run_ui_script() {
   local output exit_status
   output=$(osascript - "$@" 2>&1 <<'APPLESCRIPT'
 on run argv
-	with timeout of 10 seconds
+	with timeout of 15 seconds
 	set mode to item 1 of argv
-	if mode is "refresh-confirm" then return my clickRefreshConfirmation()
 	tell application "System Events"
 		tell process "GlobalProtect"
 			set uiElements to my findPopoverElements()
@@ -80,7 +78,12 @@ on run argv
 	end tell
 	if mode is "dump" then return my dumpElements(uiElements)
 	if mode is "click" then return my clickButton(uiElements, item 2 of argv)
-	if mode is "refresh-menu" then return my clickRefreshMenuItem(uiElements)
+	if mode is "refresh" then
+		set currentDump to my dumpElements(uiElements)
+		if currentDump contains "text:Refresh?" or currentDump contains "text:接続を更新しますか" then return my clickRefreshConfirmation()
+		my clickRefreshMenuItem(uiElements)
+		return my clickRefreshConfirmation()
+	end if
 	error "Unknown mode: " & mode
 	end timeout
 end run
@@ -189,30 +192,46 @@ on findRefreshMenuItem(optionsButton)
 end findRefreshMenuItem
 
 on clickRefreshConfirmation()
+	set sawConfirmationPrompt to false
 	tell application "System Events"
-		repeat 6 times
-			delay 0.5
-			set confirmationShown to false
-			set refreshButton to missing value
-			set refreshElements to entire contents of process "GlobalProtect"
-			repeat with e in refreshElements
+		tell process "GlobalProtect"
+			repeat 12 times
+				delay 0.25
 				try
-					set elementRole to role of e
-					if elementRole is "AXStaticText" then
-						set message_ to my textOf(value of e)
-						if message_ contains "Refresh?" or message_ contains "更新?" then set confirmationShown to true
-					else if elementRole is "AXButton" then
-						set label_ to my buttonText(e)
-						if label_ is "Refresh Connection" or label_ is "接続を更新" then set refreshButton to e
-					end if
+					set candidateWindows to windows
+				on error
+					set candidateWindows to {}
 				end try
-			end repeat
-			if confirmationShown and refreshButton is not missing value then
-				click refreshButton
-				return ""
-			end if
+				repeat with candidateWindow in candidateWindows
+					set refreshButton to missing value
+					set confirmationShown to false
+					try
+						set refreshElements to entire contents of candidateWindow
+					on error
+						set refreshElements to {}
+					end try
+					repeat with e in refreshElements
+						try
+							set elementRole to role of e
+							if elementRole is "AXStaticText" then
+								set message_ to my textOf(value of e)
+								if message_ contains "Refresh?" or message_ contains "更新?" then set confirmationShown to true
+							else if elementRole is "AXButton" then
+								set label_ to my buttonText(e)
+								if label_ is "Refresh Connection" or label_ is "接続を更新" then set refreshButton to e
+							end if
+						end try
+					end repeat
+					if confirmationShown then set sawConfirmationPrompt to true
+					if confirmationShown and refreshButton is not missing value then
+						click refreshButton
+						return "confirmed"
+					end if
+				end repeat
 		end repeat
+		end tell
 	end tell
+	if sawConfirmationPrompt then error "UI element not found: Refresh Connection confirmation button" number 1001
 	error "UI element not found: Refresh Connection confirmation" number 1001
 end clickRefreshConfirmation
 
@@ -250,9 +269,11 @@ $output"
 classify_state() {
   local dump=${(L)1} line
   local authentication=false disconnecting=false connecting=false connected=false disconnected=false
-  local connect_button=false disconnect_button=false
+  local connect_button=false disconnect_button=false refresh_prompt=false refresh_button=false
   for line in ${(f)dump}; do
     case $line in
+      (text:refresh\?*|text:接続を更新しますか*) refresh_prompt=true ;;
+      (button:refresh\ connection|button:接続を更新) refresh_button=true ;;
       (button:sign\ in|button:サインイン|text:authentication|text:authentication\ failed|text:認証が必要|text:認証失敗) authentication=true ;;
       (text:disconnecting|text:disconnecting...|text:切断中|text:切断中...|text:切断中…) disconnecting=true ;;
       (text:connecting|text:connecting...|text:接続中|text:接続中...|text:接続中…) connecting=true ;;
@@ -262,7 +283,9 @@ classify_state() {
       (button:connect|button:接続) connect_button=true ;;
     esac
   done
-  if [[ $connected == true && ( $disconnected == true || $authentication == true ) ]]; then
+  if [[ $refresh_prompt == true && $refresh_button == true ]]; then
+    print refresh-confirmation-required
+  elif [[ $connected == true && ( $disconnected == true || $authentication == true ) ]]; then
     print unknown
   elif [[ $authentication == true ]]; then
     print authentication-required
@@ -403,8 +426,18 @@ cmd_disconnect() {
 
 cmd_refresh() {
   ensure_app_running
-  run_ui_script refresh-menu >/dev/null
-  run_ui_script refresh-confirm >/dev/null
+  local state confirmation
+  state=$(read_state) || return $?
+  case $state in
+    connected | connecting | refresh-confirmation-required) ;;
+    disconnected) die $EXIT_FAILURE "GlobalProtect is disconnected. Use 'gpctl connect'." ;;
+    authentication-required) die $EXIT_FAILURE "$AUTH_MESSAGE" ;;
+    disconnecting) die $EXIT_FAILURE "GlobalProtect is disconnecting. Try again later." ;;
+    *) die $EXIT_UNKNOWN_STATE "Could not determine GlobalProtect state. Run with --verbose for details." ;;
+  esac
+  confirmation=$(run_ui_script refresh) || return $?
+  log_verbose "refresh confirmation: $confirmation"
+  [[ $confirmation == confirmed ]] || die $EXIT_UNKNOWN_STATE "Refresh confirmation was not completed. Check GlobalProtect before retrying."
   print "Connection refresh started."
 }
 

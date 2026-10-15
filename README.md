@@ -135,7 +135,7 @@ gpctl disconnect
 gpctl refresh
 ```
 
-GlobalProtect のオプションメニューから **Refresh Connection** を選び、確認画面の同名のボタンを押して終了します。接続し直すまで待たないため、認証が必要な場合はブラウザで完了し、更新後に `gpctl status` で状態を確認してください。
+GlobalProtect のオプションメニューから **Refresh Connection** を選び、確認画面の同名のボタンを押して終了します。未接続のときは `gpctl connect` を使用してください。コマンドは再接続完了を待たないため、認証が必要な場合はブラウザで完了し、後から `gpctl status` で状態を確認してください。
 
 ### 接続状態を確認する
 
@@ -151,6 +151,7 @@ disconnected
 connecting
 disconnecting
 authentication-required
+refresh-confirmation-required
 unknown
 ```
 
@@ -208,7 +209,7 @@ gpctl toggle
 5. 状態を再取得せずに終了します。接続完了は後から `gpctl status` で確認します。
 
 `gpctl disconnect` も状態を 1 回取得し、必要な場合に **Disconnect** ボタンを 1 回押して終了します。`gpctl toggle` は 1 回取得した状態に応じて接続または切断を選びます。
-`gpctl refresh` はオプションメニューの **Refresh Connection** を選び、確認画面のボタンを押して終了します。更新後の接続状態は監視しません。
+`gpctl refresh` はオプションメニューの **Refresh Connection** を選び、確認画面のボタンを押せた場合に操作開始を報告します。更新後の接続状態は監視しません。
 
 `status` は GlobalProtect の画面表示を読み取ります。画面が `connecting` のまま固まっている場合、接続処理が進行中とは限りません。
 `status` はポップオーバーを閉じずに戻るため、画面が表示されたままになる場合があります。
